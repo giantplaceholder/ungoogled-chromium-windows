@@ -179,6 +179,7 @@ jobs:
           run-id: ${{ needs.resolve-release-context.outputs.arm_run_id }}
 
       - name: Publish release
+        if: false # temporarily disabled
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve-release-context.outputs.target_tag }}
@@ -188,6 +189,7 @@ jobs:
             artifacts/**/ungoogled-chromium*
 
   publish-winget:
+    if: false # temporarily disabled
     needs:
       - resolve-release-context
       - publish-release
@@ -207,6 +209,7 @@ jobs:
           fork-user: Nifury
 
   update-binaries:
+    if: false # temporarily disabled
     needs:
       - resolve-release-context
       - publish-release
