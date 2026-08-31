@@ -223,6 +223,10 @@ def main():
             "ERROR: could not find AdditionalCertificates::New() anchor",
             file=sys.stderr,
         )
+        print("DEBUG: matching lines in profile_network_context_service.cc:", file=sys.stderr)
+        for n, line in enumerate(text.splitlines(), 1):
+            if "additional_certificates" in line.lower() or "certificatepolicy" in line.lower() or "trust_anchor" in line.lower():
+                print(f"{n}: {line}", file=sys.stderr)
         sys.exit(1)
 
     text = text.replace(use_anchor, use_anchor + USE_BLOCK, 1)
