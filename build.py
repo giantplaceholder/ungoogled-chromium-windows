@@ -241,6 +241,25 @@ def main():
             None
         )
 
+        # Embed Russian Trusted Root CA with DNS constraints.
+        embed_russian_ca = _ROOT_DIR / 'scripts' / 'embed_russian_ca.py'
+
+        if embed_russian_ca.exists():
+            get_logger().info('Embedding Russian Trusted Root CA...')
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(embed_russian_ca),
+                    '--source-root',
+                    str(source_tree),
+                ],
+                check=True,
+            )
+        else:
+            get_logger().info(
+                'Russian CA embedding script not present; skipping.'
+            )
+
     # Check if rust-toolchain folder has been populated
     HOST_CPU_IS_64BIT = sys.maxsize > 2**32
     RUST_DIR_DST = source_tree / 'third_party' / 'rust-toolchain'
