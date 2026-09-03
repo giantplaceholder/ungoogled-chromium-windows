@@ -179,7 +179,6 @@ jobs:
           run-id: ${{ needs.resolve-release-context.outputs.arm_run_id }}
 
       - name: Publish release
-        if: false # temporarily disabled
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.resolve-release-context.outputs.target_tag }}
@@ -193,7 +192,6 @@ jobs:
     needs:
       - resolve-release-context
       - publish-release
-    if: ${{ needs.resolve-release-context.outputs.ready == 'true' && needs.resolve-release-context.outputs.publishable == 'true' }}
     runs-on: ubuntu-slim
     steps:
       - name: Get version
@@ -213,7 +211,6 @@ jobs:
     needs:
       - resolve-release-context
       - publish-release
-    if: ${{ needs.resolve-release-context.outputs.ready == 'true' && needs.resolve-release-context.outputs.publishable == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout ungoogled-chromium-windows
