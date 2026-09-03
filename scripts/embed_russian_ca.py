@@ -10,6 +10,8 @@ from pathlib import Path
 
 EXPECTED_SHA256 = "d26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31"
 
+DOMAINS_FILE = Path(__file__).resolve().parent / "russian_trusted_domains.txt"
+
 K_RUSSIAN_TRUSTED_ROOT_CA_DER = bytes([
     0x30, 0x82, 0x05, 0xc2, 0x30, 0x82, 0x03, 0xaa, 0xa0, 0x03, 0x02, 0x01,
     0x02, 0x02, 0x02, 0x10, 0x00, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
@@ -137,6 +139,105 @@ K_RUSSIAN_TRUSTED_ROOT_CA_DER = bytes([
     0x12, 0x6e,
 ])
 
+
+def load_domains(path: Path) -> list[str]:
+    """Load and validate DNS constraints from a one-domain-per-line file."""
+
+    if not path.exists():
+        print(f"ERROR: {path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    domains = []
+
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        line = line.strip()
+
+        # Ignore blank lines and comments.
+        if not line or line.startswith("#"):
+            continue
+
+        # Only the leading dot is special. It means subdomains only.
+        domain = line[1:] if line.startswith(".") else line
+
+        if not domain:
+            print(
+                f"ERROR: empty domain on line {line_number} in {path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        # Chromium's DNS constraint syntax expects DNS names, not URLs,
+        # paths, ports, wildcards, or other arbitrary strings.
+        if (
+            len(domain) > 253
+            or domain.startswith(".")
+            or domain.endswith(".")
+            or ".." in domain
+            or not re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*",
+                domain,
+            )
+        ):
+            print(
+                f"ERROR: invalid DNS name on line {line_number}: {line!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        domains.append(line)
+
+    if not domains:
+        print(f"ERROR: no domains found in {path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Preserve file order while rejecting duplicates.
+    seen = set()
+    duplicates = []
+
+    for domain in domains:
+        if domain in seen:
+            duplicates.append(domain)
+        else:
+            seen.add(domain)
+
+    if duplicates:
+        print(
+            f"ERROR: duplicate domain(s) in {path}: "
+            + ", ".join(repr(d) for d in duplicates),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return domains
+
+
+def cpp_string(value: str) -> str:
+    """Return a safely escaped C++ string literal."""
+
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def make_dns_initializer(domains: list[str]) -> str:
+    """Generate a readable C++ initializer from the domain list."""
+
+    lines = [
+        "russian_trusted_root->permitted_dns_names = {",
+    ]
+
+    for domain in domains:
+        lines.append(f"    {cpp_string(domain)},")
+
+    lines.append("};")
+    return "\n".join(lines)
+
+
+DOMAINS = load_domains(DOMAINS_FILE)
+DNS_INITIALIZER = make_dns_initializer(DOMAINS)
+
+
 DEFINITION = f'''
 // BEGIN Russian Trusted Root CA (DNS-constrained)
 // Source: https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt
@@ -148,19 +249,18 @@ constexpr uint8_t kRussianTrustedRootCaDer[] = {{
 
 '''
 
-USE_BLOCK = '''
+USE_BLOCK = f'''
   // BEGIN Russian Trusted Root CA scoped trust
-  {
+  {{
     auto russian_trusted_root =
         cert_verifier::mojom::CertWithConstraints::New();
     russian_trusted_root->certificate = std::vector<uint8_t>(
         kRussianTrustedRootCaDer,
         kRussianTrustedRootCaDer + sizeof(kRussianTrustedRootCaDer));
-    // Leading dot permits subdomains only
-    russian_trusted_root->permitted_dns_names = {"sberbank.ru", ".sberbank.ru", "sberbank.com", ".sberbank.com", "sbrf.ru", ".sbrf.ru", "online.sberbank.ru", "vtb.ru", ".vtb.ru", "rshb.ru", ".rshb.ru", "tinkoff.ru", ".tinkoff.ru", "tbank.ru", ".tbank.ru", "uralsib.ru", ".uralsib.ru", "psbank.ru", ".psbank.ru", "bspb.ru", ".bspb.ru", "alfabank.ru", ".alfabank.ru", "mkb.ru", ".mkb.ru", "nspk.ru", ".nspk.ru", "nsbank.ru", ".nsbank.ru", "rzd.ru", ".rzd.ru", "gov.ru", ".gov.ru", "veb.ru", ".veb.ru"};
+    {DNS_INITIALIZER}
     additional_certificates->trust_anchors_with_additional_constraints.push_back(
         std::move(russian_trusted_root));
-  }
+  }}
   // END Russian Trusted Root CA scoped trust
 '''
 
@@ -197,7 +297,6 @@ def main():
         sys.exit(1)
 
     text = source_file.read_text(encoding="utf-8")
-
     if "kRussianTrustedRootCaDer" in text:
         print("Already patched – skipping")
         return
@@ -214,7 +313,6 @@ def main():
     )
 
     match = use_anchor_pattern.search(text)
-
     if not match:
         print(
             "ERROR: could not find AdditionalCertificates::New() anchor",
