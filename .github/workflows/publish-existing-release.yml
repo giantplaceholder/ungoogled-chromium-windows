@@ -1,0 +1,160 @@
+name: publish-existing-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags origin
+
+      - name: Resolve tag
+        id: tag
+        env:
+          TARGET_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if ! git rev-parse --verify "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
+            echo "::error::Tag does not exist: $TARGET_TAG"
+            exit 1
+          fi
+
+          TARGET_SHA="$(git rev-list -n 1 "refs/tags/$TARGET_TAG")"
+
+          echo "Target tag: $TARGET_TAG"
+          echo "Target SHA: $TARGET_SHA"
+
+          echo "target_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Locate existing builds
+        id: runs
+        uses: actions/github-script@v9
+        env:
+          TARGET_SHA: ${{ steps.tag.outputs.target_sha }}
+        with:
+          script: |
+            const workflows = [
+              {
+                key: 'x64',
+                file: 'build-x64.yml',
+              },
+              {
+                key: 'x86',
+                file: 'build-x86.yml',
+              },
+            ];
+
+            const targetSha = process.env.TARGET_SHA;
+
+            for (const workflow of workflows) {
+              core.info(`Searching ${workflow.file}`);
+              core.info(`SHA: ${targetSha}`);
+
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflow.file,
+                head_sha: targetSha,
+                status: 'completed',
+                per_page: 100,
+              });
+
+              const successful = data.workflow_runs
+                .filter(run =>
+                  run.head_sha === targetSha &&
+                  run.conclusion === 'success'
+                )
+                .sort(
+                  (a, b) =>
+                    Date.parse(b.created_at) -
+                    Date.parse(a.created_at)
+                );
+
+              if (successful.length === 0) {
+                core.setFailed(
+                  `No successful ${workflow.file} run found for ${targetSha}`
+                );
+                return;
+              }
+
+              const run = successful[0];
+
+              core.info(
+                `Selected ${workflow.file} run ${run.id}`
+              );
+
+              core.info(
+                `URL: ${run.html_url}`
+              );
+
+              core.setOutput(
+                `${workflow.key}_run_id`,
+                String(run.id)
+              );
+            }
+
+      - name: Show resolved runs
+        env:
+          TAG: ${{ steps.tag.outputs.target_tag }}
+          SHA: ${{ steps.tag.outputs.target_sha }}
+          X64: ${{ steps.runs.outputs.x64_run_id }}
+          X86: ${{ steps.runs.outputs.x86_run_id }}
+        run: |
+          echo "========================================"
+          echo "Release"
+          echo "========================================"
+          echo "Tag:  $TAG"
+          echo "SHA:  $SHA"
+          echo "x64:  $X64"
+          echo "x86:  $X86"
+          echo "========================================"
+
+      - name: Download x64 package
+        uses: actions/download-artifact@v8
+        with:
+          name: chromium
+          path: artifacts/x64
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.runs.outputs.x64_run_id }}
+
+      - name: Download x86 package
+        uses: actions/download-artifact@v8
+        with:
+          name: chromium-x86
+          path: artifacts/x86
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.runs.outputs.x86_run_id }}
+
+      - name: Show artifacts
+        run: |
+          find artifacts -type f -print
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.target_tag }}
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            artifacts/**/ungoogled-chromium*
