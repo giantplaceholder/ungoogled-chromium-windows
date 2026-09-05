@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   resolve-release-context:
+    name: Resolve release context
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
@@ -38,85 +39,101 @@ jobs:
       x86_run_id: ${{ steps.runs.outputs.x86_run_id }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Fetch tags
+      - name: Fetch all tags
         run: git fetch --force --tags origin
 
-      - name: Resolve target tag
+      - name: Resolve target
         id: context
         env:
           EVENT_NAME: ${{ github.event_name }}
-          DISPATCH_REF_TYPE: ${{ github.ref_type }}
-          DISPATCH_REF_NAME: ${{ github.ref_name }}
-          DISPATCH_SHA: ${{ github.sha }}
-          WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          WORKFLOW_RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          WORKFLOW_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "Event: $EVENT_NAME"
-          echo "Ref type: $DISPATCH_REF_TYPE"
-          echo "Ref name: $DISPATCH_REF_NAME"
-          echo "SHA: $DISPATCH_SHA"
+          echo "Event:              $EVENT_NAME"
+          echo "Ref type:           $REF_TYPE"
+          echo "Ref name:           $REF_NAME"
+          echo "Workflow SHA:       $WORKFLOW_SHA"
+          echo "Workflow branch:    $WORKFLOW_BRANCH"
+          echo "Workflow repository: $WORKFLOW_REPOSITORY"
+          echo
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            if [ "$DISPATCH_REF_TYPE" != "tag" ]; then
-              echo "::error::Manual publish must be run on a tag."
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$REF_TYPE" != "tag" ]]; then
+              echo "::error::Manual publishing must be run against a tag."
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            target_tag="$DISPATCH_REF_NAME"
-            target_sha="$DISPATCH_SHA"
+            target_tag="$REF_NAME"
+
+            if ! git rev-parse --verify "refs/tags/$target_tag" >/dev/null 2>&1; then
+              echo "::error::Tag does not exist locally: $target_tag"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            target_sha="$(git rev-list -n 1 "refs/tags/$target_tag")"
 
           else
-            if [ "$WORKFLOW_RUN_HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
-              echo "::warning::Triggered by a fork run; skipping publish."
+            if [[ "$WORKFLOW_REPOSITORY" != "$GITHUB_REPOSITORY" ]]; then
+              echo "::warning::Workflow was triggered by a fork."
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            target_sha="$WORKFLOW_RUN_HEAD_SHA"
-            candidate_tag="$WORKFLOW_RUN_HEAD_BRANCH"
+            target_sha="$WORKFLOW_SHA"
 
-            echo "Workflow run SHA: $target_sha"
-            echo "Workflow run branch: $candidate_tag"
-            echo "Workflow run repository: $WORKFLOW_RUN_HEAD_REPOSITORY"
-
-            if [ -z "$candidate_tag" ]; then
-              echo "::warning::Workflow run has no head branch/tag."
+            if [[ -z "$target_sha" ]]; then
+              echo "::warning::workflow_run did not provide a SHA."
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
 
-            if ! git rev-parse -q --verify "refs/tags/$candidate_tag" >/dev/null; then
-              echo "::warning::$candidate_tag is not a tag in this repository."
+            # Find a tag pointing exactly at the workflow's SHA.
+            target_tag=""
+
+            while IFS= read -r tag; do
+              if [[ -n "$tag" ]]; then
+                tag_sha="$(git rev-list -n 1 "refs/tags/$tag")"
+
+                if [[ "$tag_sha" == "$target_sha" ]]; then
+                  target_tag="$tag"
+                  break
+                fi
+              fi
+            done < <(git for-each-ref \
+              --format='%(refname:strip=2)' \
+              refs/tags)
+
+            if [[ -z "$target_tag" ]]; then
+              echo "::warning::No tag points to SHA $target_sha."
               echo "ready=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-
-            tag_sha="$(git rev-list -n 1 "$candidate_tag")"
-
-            if [ "$tag_sha" != "$target_sha" ]; then
-              echo "::warning::Tag $candidate_tag points to $tag_sha, not $target_sha."
-              echo "ready=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            target_tag="$candidate_tag"
           fi
 
-          echo "Resolved target tag: $target_tag"
-          echo "Resolved target SHA: $target_sha"
+          echo
+          echo "========================================"
+          echo "Resolved release"
+          echo "========================================"
+          echo "Tag: $target_tag"
+          echo "SHA: $target_sha"
+          echo "========================================"
 
           echo "ready=true" >> "$GITHUB_OUTPUT"
           echo "target_tag=$target_tag" >> "$GITHUB_OUTPUT"
-          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$target_sha"
 
       - name: Locate successful builds
         id: runs
@@ -139,14 +156,13 @@ jobs:
 
             const targetSha = process.env.TARGET_SHA;
 
-            const outputs = {
-              publishable: 'true',
-            };
+            let publishable = true;
 
-            core.info(`Looking for builds at SHA: ${targetSha}`);
+            core.info(`Target SHA: ${targetSha}`);
+            core.info('');
 
             for (const workflow of workflows) {
-              core.info(`Searching ${workflow.file}...`);
+              core.info(`========== ${workflow.key} ==========`);
 
               const { data } = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
@@ -158,7 +174,7 @@ jobs:
               });
 
               core.info(
-                `${workflow.file}: GitHub returned ${data.workflow_runs.length} run(s)`
+                `Found ${data.workflow_runs.length} completed run(s)`
               );
 
               for (const run of data.workflow_runs) {
@@ -166,72 +182,64 @@ jobs:
                   JSON.stringify({
                     id: run.id,
                     run_number: run.run_number,
-                    head_sha: run.head_sha,
-                    head_branch: run.head_branch,
-                    event: run.event,
                     status: run.status,
                     conclusion: run.conclusion,
+                    event: run.event,
+                    head_sha: run.head_sha,
+                    head_branch: run.head_branch,
                     created_at: run.created_at,
-                    html_url: run.html_url,
+                    url: run.html_url,
                   })
                 );
               }
 
-              const successfulRuns = data.workflow_runs
-                .filter((run) => run.conclusion === 'success')
+              const successful = data.workflow_runs
+                .filter(run =>
+                  run.head_sha === targetSha &&
+                  run.conclusion === 'success'
+                )
                 .sort(
                   (a, b) =>
                     Date.parse(b.created_at) -
                     Date.parse(a.created_at)
                 );
 
-              const latest = successfulRuns[0];
-
-              if (!latest) {
+              if (successful.length === 0) {
                 core.error(
-                  `No successful ${workflow.file} run found for SHA ${targetSha}`
+                  `NO SUCCESSFUL ${workflow.key} BUILD FOUND`
                 );
 
-                outputs.publishable = 'false';
+                publishable = false;
                 continue;
               }
 
+              const selected = successful[0];
+
+              core.info('');
               core.info(
-                `Selected ${workflow.file} run ${latest.id}`
+                `Selected ${workflow.key}: ${selected.id}`
+              );
+              core.info(
+                `URL: ${selected.html_url}`
               );
 
-              core.info(
-                `URL: ${latest.html_url}`
+              core.setOutput(
+                `${workflow.key}_run_id`,
+                String(selected.id)
               );
-
-              outputs[`${workflow.key}_run_id`] =
-                String(latest.id);
             }
-
-            core.info(
-              `publishable=${outputs.publishable}`
-            );
 
             core.setOutput(
               'publishable',
-              outputs.publishable
+              publishable ? 'true' : 'false'
             );
 
-            if (outputs.x64_run_id) {
-              core.setOutput(
-                'x64_run_id',
-                outputs.x64_run_id
-              );
-            }
+            core.info('');
+            core.info(
+              `FINAL publishable=${publishable}`
+            );
 
-            if (outputs.x86_run_id) {
-              core.setOutput(
-                'x86_run_id',
-                outputs.x86_run_id
-              );
-            }
-
-      - name: Debug resolved outputs
+      - name: Debug outputs
         if: always()
         env:
           READY: ${{ steps.context.outputs.ready }}
@@ -242,7 +250,7 @@ jobs:
           X86_RUN_ID: ${{ steps.runs.outputs.x86_run_id }}
         run: |
           echo "========================================"
-          echo "Release context"
+          echo "FINAL RELEASE CONTEXT"
           echo "========================================"
           echo "ready=$READY"
           echo "publishable=$PUBLISHABLE"
@@ -253,6 +261,7 @@ jobs:
           echo "========================================"
 
   publish-release:
+    name: Publish GitHub release
     needs: resolve-release-context
 
     if: >-
@@ -296,8 +305,14 @@ jobs:
 
       - name: Show downloaded artifacts
         run: |
-          echo "Downloaded files:"
-          find artifacts -type f -maxdepth 5 -print
+          echo "========================================"
+          echo "Downloaded artifacts"
+          echo "========================================"
+
+          find artifacts \
+            -type f \
+            -maxdepth 5 \
+            -print
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
